@@ -1,13 +1,22 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { ComposableMap, Geographies, Geography, ZoomableGroup } from 'react-simple-maps'
 import { scaleQuantile } from 'd3-scale'
-import { interpolateYlOrRd, interpolateBlues } from 'd3-scale-chromatic'
+import { interpolateRdYlGn, interpolateBlues, interpolateOranges } from 'd3-scale-chromatic'
 import { extent } from 'd3-array'
 import { supabase, isConfigured } from './supabase'
 
-/* ══════════════════════════════════════════════════════════════
-   DATA — Zone definitions + seeded fallback
-══════════════════════════════════════════════════════════════ */
+/* ══ DESIGN TOKENS ══════════════════════════════════════════════ */
+const T = {
+  navy:'#0d1b2a', navyMid:'#162032', navyLt:'#1e2d40',
+  fog:'#8fa3b8', mist:'#b8c9d9', paper:'#f2ede4',
+  ink:'#1a1a1a', accent:'#e8472a', gold:'#c9a84c', teal:'#2a9d8f',
+  border:'#2e3f52', live:'#00e5a0',
+  serif:"'Libre Baskerville',Georgia,serif",
+  sans:"'DM Sans',system-ui,sans-serif",
+  mono:"'DM Mono','Courier New',monospace",
+}
+
+/* ══ ZONE DATA ══════════════════════════════════════════════════ */
 const RAW_ZONES = [
   {z:'ET010100',n:'Tigray Central',r:'Tigray',lat:13.5,lon:39.5},
   {z:'ET010200',n:'Tigray Eastern',r:'Tigray',lat:13.8,lon:40.2},
@@ -69,227 +78,152 @@ const RAW_ZONES = [
 ]
 
 const REGION_BASE = {
-  'Addis Ababa':     {inc:38000,pov:18,hdi:.62},
-  'Dire Dawa':       {inc:28000,pov:28,hdi:.52},
-  'Harari':          {inc:24000,pov:32,hdi:.49},
-  'Tigray':          {inc:14000,pov:52,hdi:.42},
-  'Amhara':          {inc:12000,pov:58,hdi:.38},
-  'Oromia':          {inc:13500,pov:55,hdi:.40},
-  'SNNPR':           {inc:11000,pov:62,hdi:.37},
-  'Somali':          {inc:9500, pov:68,hdi:.33},
-  'Benshangul-Gumuz':{inc:10000,pov:66,hdi:.35},
-  'Gambella':        {inc:10500,pov:64,hdi:.36},
-  'Afar':            {inc:8500, pov:72,hdi:.31},
+  'Addis Ababa':{inc:38000,pov:18,hdi:.62},'Dire Dawa':{inc:28000,pov:28,hdi:.52},
+  'Harari':{inc:24000,pov:32,hdi:.49},'Tigray':{inc:14000,pov:52,hdi:.42},
+  'Amhara':{inc:12000,pov:58,hdi:.38},'Oromia':{inc:13500,pov:55,hdi:.40},
+  'SNNPR':{inc:11000,pov:62,hdi:.37},'Somali':{inc:9500,pov:68,hdi:.33},
+  'Benshangul-Gumuz':{inc:10000,pov:66,hdi:.35},'Gambella':{inc:10500,pov:64,hdi:.36},
+  'Afar':{inc:8500,pov:72,hdi:.31},
 }
-const YEARS = [2015, 2017, 2019, 2021, 2023]
+const YEARS = [2015,2017,2019,2021,2023]
 
-function seed(s) {
-  let h = 0
-  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0
-  return (h >>> 0) / 0xffffffff
-}
+function seed(s){let h=0;for(let i=0;i<s.length;i++)h=(Math.imul(31,h)+s.charCodeAt(i))|0;return(h>>>0)/0xffffffff}
 
-function buildFallback(metric, year) {
-  const gf = 1 + (year - 2015) * 0.055
-  return RAW_ZONES.map(z => {
-    const b = REGION_BASE[z.r] ?? {inc:11000,pov:60,hdi:.38}
-    const j = 0.8 + seed(z.z + year) * 0.4
+function buildFallback(metric,year){
+  const gf=1+(year-2015)*0.055
+  return RAW_ZONES.map(z=>{
+    const b=REGION_BASE[z.r]??{inc:11000,pov:60,hdi:.38}
+    const j=0.8+seed(z.z+year)*0.4
     let value
-    if      (metric === 'income')  value = Math.round(b.inc * gf * j)
-    else if (metric === 'poverty') value = +((b.pov * (1 - (year-2015)*0.015) * j).toFixed(1))
-    else                           value = +(((b.hdi + (year-2015)*0.008) * j).toFixed(3))
-    return { zone_code:z.z, zone_name:z.n, region:z.r, lat:z.lat, lon:z.lon, value }
+    if(metric==='income')value=Math.round(b.inc*gf*j)
+    else if(metric==='poverty')value=+((b.pov*(1-(year-2015)*0.015)*j).toFixed(1))
+    else value=+(((b.hdi+(year-2015)*0.008)*j).toFixed(3))
+    return{zone_code:z.z,zone_name:z.n,region:z.r,lat:z.lat,lon:z.lon,value}
   })
 }
+const FALLBACK={}
+;['income','poverty','hdi'].forEach(m=>{FALLBACK[m]={};YEARS.forEach(y=>{FALLBACK[m][y]=buildFallback(m,y)})})
 
-// Pre-build fallback for all metric/year combos
-const FALLBACK = {}
-;['income','poverty','hdi'].forEach(m => {
-  FALLBACK[m] = {}
-  YEARS.forEach(y => { FALLBACK[m][y] = buildFallback(m, y) })
-})
-
-/* ══════════════════════════════════════════════════════════════
-   SUPABASE FETCH — reads from eth_zone_metrics table
-   Falls back to built-in data seamlessly if not configured.
-
-   SQL to run in Supabase SQL Editor to create + seed the table:
-   See README.md or supabase/seed.sql in this repo.
-══════════════════════════════════════════════════════════════ */
-async function fetchData(metric, year) {
-  if (!isConfigured || !supabase) {
-    await new Promise(r => setTimeout(r, 180))
-    return { rows: FALLBACK[metric][year], source: 'fallback' }
-  }
-  try {
-    const { data, error } = await supabase
-      .from('eth_zone_metrics')
-      .select('zone_code, zone_name, region, lat, lon, value')
-      .eq('metric', metric)
-      .eq('year', year)
-      .order('zone_code')
-
-    if (error) throw error
-    if (!data || data.length === 0) {
-      return { rows: FALLBACK[metric][year], source: 'fallback' }
-    }
-    return { rows: data, source: 'supabase' }
-  } catch (e) {
-    console.warn('Supabase fetch failed, using fallback:', e.message)
-    return { rows: FALLBACK[metric][year], source: 'fallback' }
-  }
+/* ══ FETCH ══════════════════════════════════════════════════════ */
+async function fetchData(metric,year){
+  if(!isConfigured||!supabase){await new Promise(r=>setTimeout(r,120));return{rows:FALLBACK[metric][year],source:'fallback'}}
+  try{
+    const{data,error}=await supabase.from('eth_zone_metrics').select('zone_code,zone_name,region,lat,lon,value').eq('metric',metric).eq('year',year).order('zone_code')
+    if(error)throw error
+    if(!data||data.length===0)return{rows:FALLBACK[metric][year],source:'fallback'}
+    return{rows:data,source:'supabase'}
+  }catch(e){console.warn('Supabase fetch failed:',e.message);return{rows:FALLBACK[metric][year],source:'fallback'}}
 }
 
-/* ══════════════════════════════════════════════════════════════
-   METRIC CONFIG
-══════════════════════════════════════════════════════════════ */
-const METRICS = {
-  income:  { label:'Per capita income',      unit:'ETB/yr', short:'Income',  fmt: v => `ETB ${Math.round(v).toLocaleString()}` },
-  poverty: { label:'Poverty headcount',       unit:'%',      short:'Poverty', fmt: v => `${v.toFixed(1)}%` },
-  hdi:     { label:'Human Development Index', unit:'score',  short:'HDI',     fmt: v => v.toFixed(3) },
+/* ══ METRICS ════════════════════════════════════════════════════ */
+const METRICS={
+  income:{label:'Per Capita Income',unit:'ETB/yr',short:'Income',fmt:v=>`ETB ${Math.round(v).toLocaleString()}`,color:interpolateOranges,desc:'Annual household income per capita in Ethiopian Birr'},
+  poverty:{label:'Poverty Rate',unit:'%',short:'Poverty',fmt:v=>`${v.toFixed(1)}%`,color:interpolateBlues,desc:'Share of population below national poverty line'},
+  hdi:{label:'Human Dev. Index',unit:'0–1',short:'HDI',fmt:v=>v.toFixed(3),color:interpolateRdYlGn,desc:'Composite measure of life expectancy, education, and income'},
 }
 
-/* ══════════════════════════════════════════════════════════════
-   GEO — synthesised elliptical zone polygons from centroids
-   (production: swap for HDX geoBoundaries ETH ADM2 GeoJSON)
-══════════════════════════════════════════════════════════════ */
-function makeGeoJSON(zones) {
-  return {
-    type: 'FeatureCollection',
-    features: zones.map(z => {
-      const w = 0.52 + seed(z.z+'w') * 0.55
-      const h = 0.42 + seed(z.z+'h') * 0.48
-      const steps = 24
-      const coords = Array.from({length: steps+1}, (_, i) => {
-        const a = (i / steps) * 2 * Math.PI
-        return [z.lon + Math.cos(a)*w, z.lat + Math.sin(a)*h]
-      })
-      return {
-        type: 'Feature',
-        properties: { zone_code:z.z, zone_name:z.n, region:z.r },
-        geometry: { type:'Polygon', coordinates:[coords] },
-      }
-    }),
-  }
+/* ══ GEO ════════════════════════════════════════════════════════ */
+function makeGeoJSON(zones){
+  return{type:'FeatureCollection',features:zones.map(z=>{
+    const w=0.52+seed(z.z+'w')*0.55,h=0.42+seed(z.z+'h')*0.48,steps=24
+    const coords=Array.from({length:steps+1},(_,i)=>{const a=(i/steps)*2*Math.PI;return[z.lon+Math.cos(a)*w,z.lat+Math.sin(a)*h]})
+    return{type:'Feature',properties:{zone_code:z.z,zone_name:z.n,region:z.r},geometry:{type:'Polygon',coordinates:[coords]}}
+  })}
 }
-const ETH_GEO = makeGeoJSON(RAW_ZONES)
+const ETH_GEO=makeGeoJSON(RAW_ZONES)
 
-/* ══════════════════════════════════════════════════════════════
-   COLOUR HELPERS
-══════════════════════════════════════════════════════════════ */
-function makeColorScale(domain, metric) {
-  const fn = metric === 'poverty' ? interpolateBlues : interpolateYlOrRd
-  return scaleQuantile().domain(domain).range(
-    Array.from({length:8}, (_,i) => fn(metric==='poverty' ? 0.2+(i/7)*0.8 : i/7))
+function makeColorScale(domain,metric){
+  return scaleQuantile().domain(domain).range(Array.from({length:8},(_,i)=>METRICS[metric].color(0.15+i/7*0.75)))
+}
+
+/* ══ CSS ════════════════════════════════════════════════════════ */
+const CSS=`
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:${T.navy};overflow:hidden}
+::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:${T.navyMid}}::-webkit-scrollbar-thumb{background:${T.border};border-radius:2px}
+@keyframes pulse-ring{0%{transform:scale(.8);opacity:1}100%{transform:scale(2.4);opacity:0}}
+@keyframes zone-flash{0%,100%{opacity:1}50%{opacity:.25}}
+@keyframes slide-in{from{transform:translateX(30px);opacity:0}to{transform:translateX(0);opacity:1}}
+@keyframes fade-up{from{transform:translateY(8px);opacity:0}to{transform:translateY(0);opacity:1}}
+@keyframes spin{to{transform:rotate(360deg)}}
+.flash{animation:zone-flash .7s ease-out}
+.slide-in{animation:slide-in .32s cubic-bezier(.22,.68,0,1.2) both}
+.fade-up{animation:fade-up .35s ease both}
+.btn{padding:5px 14px;font-family:${T.sans};font-size:11px;font-weight:500;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;border:1px solid ${T.border};background:transparent;color:${T.fog};transition:all .18s}
+.btn.m:first-child{border-radius:3px 0 0 3px;border-right:none}.btn.m:last-child{border-radius:0 3px 3px 0}
+.btn.active{background:${T.accent};border-color:${T.accent};color:#fff}
+.btn.y{font-family:${T.mono};font-size:11px;border-radius:2px}
+.btn.y.active{background:${T.gold};border-color:${T.gold};color:${T.navy};font-weight:500}
+.btn:not(.active):hover{background:${T.navyLt};color:${T.mist};border-color:${T.fog}}
+.kpi{flex:1;min-width:120px;padding:11px 18px;border-right:1px solid ${T.border};transition:background .2s}
+.kpi:hover{background:${T.navyLt}}
+.zone-row{display:flex;align-items:center;gap:8px;padding:6px 14px;border-bottom:1px solid ${T.border};cursor:pointer;transition:background .15s}
+.zone-row:hover{background:${T.navyLt}}.zone-row.sel{background:rgba(232,71,42,.12);border-left:2px solid ${T.accent}}
+`
+
+/* ══ LIVE DOT ═══════════════════════════════════════════════════ */
+function LiveDot({active}){
+  return(
+    <span style={{position:'relative',display:'inline-flex',alignItems:'center',justifyContent:'center',width:10,height:10,flexShrink:0}}>
+      {active&&<span style={{position:'absolute',width:10,height:10,borderRadius:'50%',background:T.live,opacity:.4,animation:'pulse-ring 1.4s ease-out infinite'}}/>}
+      <span style={{width:7,height:7,borderRadius:'50%',background:active?T.live:T.fog,transition:'background .4s'}}/>
+    </span>
   )
 }
 
-/* ══════════════════════════════════════════════════════════════
-   SPARKLINE
-══════════════════════════════════════════════════════════════ */
-function Sparkline({ zoneCode, metric, color='#c0392b', width=64, height=22 }) {
-  const ref = useRef(null)
-  useEffect(() => {
-    const canvas = ref.current; if (!canvas) return
-    const vals = YEARS.map(y => FALLBACK[metric][y].find(d => d.zone_code===zoneCode)?.value ?? 0)
-    const ctx = canvas.getContext('2d')
-    const lo = Math.min(...vals), hi = Math.max(...vals)
-    ctx.clearRect(0,0,width,height)
+/* ══ SPARKLINE ══════════════════════════════════════════════════ */
+function Sparkline({zoneCode,metric,color,w=80,h=24}){
+  const ref=useRef(null)
+  useEffect(()=>{
+    const c=ref.current;if(!c)return
+    const vals=YEARS.map(y=>FALLBACK[metric][y].find(d=>d.zone_code===zoneCode)?.value??0)
+    const ctx=c.getContext('2d');const lo=Math.min(...vals),hi=Math.max(...vals)
+    ctx.clearRect(0,0,w*2,h*2);ctx.scale(2,2)
     ctx.beginPath()
-    vals.forEach((v,i) => {
-      const x = i * (width/(vals.length-1))
-      const y = height - ((v-lo)/(hi-lo||1)) * (height-4) - 2
-      i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y)
-    })
-    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.stroke()
-  }, [zoneCode, metric, color, width, height])
-  return <canvas ref={ref} width={width} height={height} style={{display:'block'}}/>
+    vals.forEach((v,i)=>{const x=i*(w/(vals.length-1)),y=h-((v-lo)/(hi-lo||1))*(h-5)-3;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y)})
+    ctx.lineTo((vals.length-1)*(w/(vals.length-1)),h);ctx.lineTo(0,h);ctx.closePath()
+    ctx.fillStyle=color+'22';ctx.fill()
+    ctx.beginPath()
+    vals.forEach((v,i)=>{const x=i*(w/(vals.length-1)),y=h-((v-lo)/(hi-lo||1))*(h-5)-3;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y)})
+    ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.lineJoin='round';ctx.stroke()
+    vals.forEach((v,i)=>{const x=i*(w/(vals.length-1)),y=h-((v-lo)/(hi-lo||1))*(h-5)-3;ctx.beginPath();ctx.arc(x,y,1.5,0,Math.PI*2);ctx.fillStyle=color;ctx.fill()})
+  },[zoneCode,metric,color,w,h])
+  return<canvas ref={ref} width={w*2} height={h*2} style={{width:w,height:h,display:'block'}}/>
 }
 
-/* ══════════════════════════════════════════════════════════════
-   LEGEND
-══════════════════════════════════════════════════════════════ */
-function Legend({ colorScale, domain, metric }) {
-  const [lo, hi] = extent(domain)
-  return (
-    <div style={{padding:'14px 16px 0'}}>
-      <div style={{fontSize:9,textTransform:'uppercase',letterSpacing:'.13em',color:'#7a7060',marginBottom:5}}>
-        {METRICS[metric].label}
+/* ══ LEGEND ═════════════════════════════════════════════════════ */
+function Legend({colorScale,domain,metric}){
+  const[lo,hi]=extent(domain);const m=METRICS[metric]
+  return(
+    <div style={{padding:'13px 14px 11px',borderBottom:`1px solid ${T.border}`}}>
+      <div style={{fontSize:8,textTransform:'uppercase',letterSpacing:'.14em',color:T.fog,marginBottom:7}}>{m.label}</div>
+      <div style={{display:'flex',height:6,borderRadius:3,overflow:'hidden',marginBottom:4}}>
+        {Array.from({length:24},(_,i)=><div key={i} style={{flex:1,background:colorScale(lo+(hi-lo)*(i/23))}}/>)}
       </div>
-      <div style={{display:'flex',height:7,borderRadius:2,overflow:'hidden'}}>
-        {Array.from({length:8},(_,i)=>(
-          <div key={i} style={{flex:1,background:colorScale(lo+(hi-lo)*(i/7))}}/>
-        ))}
+      <div style={{display:'flex',justifyContent:'space-between',fontSize:9,fontFamily:T.mono,color:T.fog,marginBottom:6}}>
+        <span>{m.fmt(lo)}</span><span>{m.fmt(hi)}</span>
       </div>
-      <div style={{display:'flex',justifyContent:'space-between',fontSize:10,color:'#7a7060',marginTop:3}}>
-        <span>{METRICS[metric].fmt(lo)}</span>
-        <span>{METRICS[metric].fmt(hi)}</span>
-      </div>
+      <div style={{fontSize:9,color:T.fog,lineHeight:1.6,fontStyle:'italic'}}>{m.desc}</div>
     </div>
   )
 }
 
-/* ══════════════════════════════════════════════════════════════
-   RANKING PANEL
-══════════════════════════════════════════════════════════════ */
-function RankingPanel({ data, metric, selected, onSelect }) {
-  const sorted = useMemo(() => [...data].sort((a,b)=>b.value-a.value), [data])
-  const max = sorted[0]?.value ?? 1
-  return (
-    <div style={{overflowY:'auto',height:'100%'}}>
-      <div style={{padding:'10px 16px 4px',fontSize:11,color:'#7a7060',fontStyle:'italic',borderBottom:'1px solid #ece7dc'}}>
-        All zones ranked by {METRICS[metric].label}
-      </div>
-      {sorted.map((d,i) => (
-        <div key={d.zone_code}
-          onClick={()=>onSelect(selected===d.zone_code?null:d.zone_code)}
-          style={{display:'flex',alignItems:'center',gap:7,padding:'5px 16px',
-            borderBottom:'1px solid #ece7dc',cursor:'pointer',
-            background:selected===d.zone_code?'#f4efe6':'transparent'}}>
-          <span style={{fontSize:9,color:'#7a7060',minWidth:18,textAlign:'right'}}>{i+1}</span>
-          <div style={{flex:1,minWidth:0}}>
-            <div style={{fontSize:11,color:'#1a1a18',fontFamily:"'Playfair Display',serif",
-              whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{d.zone_name}</div>
-            <div style={{height:3,background:'#ece7dc',borderRadius:2,marginTop:3}}>
-              <div style={{height:'100%',width:`${(d.value/max)*100}%`,background:'#c0392b',borderRadius:2}}/>
-            </div>
-          </div>
-          <span style={{fontSize:10,color:'#c0392b',fontWeight:600,minWidth:64,textAlign:'right',
-            fontVariantNumeric:'tabular-nums'}}>{METRICS[metric].fmt(d.value)}</span>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-/* ══════════════════════════════════════════════════════════════
-   MAP
-══════════════════════════════════════════════════════════════ */
-function EthMap({ data, metric, selected, onSelect, colorScale }) {
-  const dataMap = useMemo(() => Object.fromEntries(data.map(d=>[d.zone_code,d])), [data])
-
-  return (
-    <ComposableMap
-      projection="geoMercator"
-      projectionConfig={{ center:[39.5,9.0], scale:1850 }}
-      style={{width:'100%',height:'100%'}}
-    >
-      <ZoomableGroup center={[39.5,9.0]} zoom={1} minZoom={0.8} maxZoom={10}>
+/* ══ MAP ════════════════════════════════════════════════════════ */
+function EthMap({data,metric,selected,onSelect,colorScale,flashZone}){
+  const dataMap=useMemo(()=>Object.fromEntries(data.map(d=>[d.zone_code,d])),[data])
+  return(
+    <ComposableMap projection="geoMercator" projectionConfig={{center:[39.5,9.0],scale:1900}} style={{width:'100%',height:'100%'}}>
+      <ZoomableGroup center={[39.5,9.0]} zoom={1} minZoom={0.7} maxZoom={12}>
         <Geographies geography={ETH_GEO}>
-          {({geographies}) => geographies.map(geo => {
-            const zc  = geo.properties.zone_code
-            const zd  = dataMap[zc]
-            const isSel = selected === zc
-            return (
-              <Geography
-                key={zc}
-                geography={geo}
-                fill={zd ? colorScale(zd.value) : '#ccc'}
-                stroke={isSel ? '#1a1a18' : 'rgba(255,255,255,0.5)'}
-                strokeWidth={isSel ? 2 : 0.6}
+          {({geographies})=>geographies.map(geo=>{
+            const zc=geo.properties.zone_code,zd=dataMap[zc],isSel=selected===zc,isFlash=flashZone===zc
+            return(
+              <Geography key={zc} geography={geo} className={isFlash?'flash':''}
+                fill={zd?colorScale(zd.value):T.navyLt}
+                stroke={isSel?'#fff':T.navy+'cc'} strokeWidth={isSel?1.8:.5}
                 style={{
-                  default:{outline:'none',opacity:isSel?1:.85},
-                  hover:  {outline:'none',opacity:1,stroke:'#1a1a18',strokeWidth:1.5,cursor:'pointer'},
+                  default:{outline:'none',opacity:isSel?1:.88,filter:isSel?'brightness(1.15)':'none'},
+                  hover:{outline:'none',opacity:1,cursor:'pointer',filter:'brightness(1.2)'},
                   pressed:{outline:'none'},
                 }}
                 onClick={()=>onSelect(isSel?null:zc)}
@@ -302,254 +236,252 @@ function EthMap({ data, metric, selected, onSelect, colorScale }) {
   )
 }
 
-/* ══════════════════════════════════════════════════════════════
-   TOOLTIP (follows mouse via DOM — avoids React re-render cost)
-══════════════════════════════════════════════════════════════ */
-function useTooltip(data, metric) {
-  const ttRef = useRef(null)
-  const move = useCallback((zone, evt) => {
-    const tt = ttRef.current; if (!tt) return
-    if (!zone) { tt.style.display='none'; return }
-    tt.querySelector('.tt-name').textContent = zone.zone_name
-    tt.querySelector('.tt-region').textContent = zone.region
-    tt.querySelector('.tt-val').textContent = METRICS[metric].fmt(zone.value)
-    tt.style.display='block'
-    tt.style.left = (evt.clientX+14)+'px'
-    tt.style.top  = (evt.clientY-10)+'px'
-  }, [metric])
-  return { ttRef, move }
+/* ══ RANKING ════════════════════════════════════════════════════ */
+function RankingPanel({data,metric,selected,onSelect}){
+  const sorted=useMemo(()=>[...data].sort((a,b)=>b.value-a.value),[data])
+  const max=sorted[0]?.value??1,m=METRICS[metric]
+  return(
+    <div style={{overflowY:'auto',height:'100%',background:T.navyMid}}>
+      <div style={{padding:'10px 14px 8px',fontSize:10,color:T.fog,fontStyle:'italic',borderBottom:`1px solid ${T.border}`,background:T.navy,position:'sticky',top:0}}>
+        {data.length} zones — ranked by {m.label}
+      </div>
+      {sorted.map((d,i)=>(
+        <div key={d.zone_code} className={`zone-row${selected===d.zone_code?' sel':''}`} onClick={()=>onSelect(selected===d.zone_code?null:d.zone_code)}>
+          <span style={{fontFamily:T.mono,fontSize:9,color:T.fog,minWidth:20,textAlign:'right'}}>{i+1}</span>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:11,color:T.mist,fontFamily:T.serif,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{d.zone_name}</div>
+            <div style={{height:2,background:T.navyLt,borderRadius:1,marginTop:3}}>
+              <div style={{height:'100%',width:`${(d.value/max)*100}%`,background:T.accent,borderRadius:1,transition:'width .4s ease'}}/>
+            </div>
+          </div>
+          <span style={{fontFamily:T.mono,fontSize:10,color:T.gold,fontWeight:500,minWidth:72,textAlign:'right'}}>{m.fmt(d.value)}</span>
+        </div>
+      ))}
+    </div>
+  )
 }
 
-/* ══════════════════════════════════════════════════════════════
-   APP
-══════════════════════════════════════════════════════════════ */
-const C = {
-  ink:'#1a1a18', paper:'#f4efe6', accent:'#c0392b',
-  muted:'#7a7060', border:'#d8d2c6', surface:'#ece7dc',
-  gold:'#b8952a', white:'#ffffff',
+/* ══ ZONE DETAIL ════════════════════════════════════════════════ */
+function ZoneDetail({zone,metric,year}){
+  if(!zone)return(
+    <div style={{padding:'24px 14px',color:T.fog,fontStyle:'italic',fontSize:11,lineHeight:1.8,textAlign:'center',marginTop:16}}>
+      <div style={{fontSize:32,marginBottom:12,opacity:.2}}>◈</div>
+      Click any zone on the map or ranking to explore its data
+    </div>
+  )
+  return(
+    <div className="fade-up" style={{padding:'13px',overflowY:'auto',flex:1}}>
+      <div style={{marginBottom:13}}>
+        <div style={{fontFamily:T.serif,fontWeight:700,fontSize:16,color:'#fff',lineHeight:1.25,marginBottom:4}}>{zone.zone_name}</div>
+        <div style={{fontSize:8,textTransform:'uppercase',letterSpacing:'.12em',color:T.fog}}>{zone.region} Region</div>
+      </div>
+      <div style={{background:T.navyLt,border:`1px solid ${T.border}`,borderRadius:4,padding:'11px 13px',marginBottom:11}}>
+        <div style={{fontSize:8,textTransform:'uppercase',letterSpacing:'.12em',color:T.fog,marginBottom:5}}>{METRICS[metric].label} · {year}</div>
+        <div style={{fontFamily:T.mono,fontSize:22,color:T.accent,fontWeight:500,letterSpacing:'-.02em',marginBottom:6}}>{METRICS[metric].fmt(zone.value)}</div>
+        <Sparkline zoneCode={zone.zone_code} metric={metric} color={T.accent} w={100} h={26}/>
+        <div style={{display:'flex',justifyContent:'space-between',fontSize:7,color:T.fog,fontFamily:T.mono,marginTop:2}}>
+          {YEARS.map(y=><span key={y}>{y}</span>)}
+        </div>
+      </div>
+      <div style={{fontSize:8,textTransform:'uppercase',letterSpacing:'.12em',color:T.fog,marginBottom:7}}>All indicators</div>
+      {Object.entries(METRICS).map(([mk,m])=>{
+        const val=FALLBACK[mk][year].find(d=>d.zone_code===zone.zone_code)?.value??0,isA=mk===metric
+        return(
+          <div key={mk} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'7px 0',borderBottom:`1px solid ${T.border}`}}>
+            <div>
+              <div style={{fontSize:8,color:isA?T.gold:T.fog,textTransform:'uppercase',letterSpacing:'.08em',marginBottom:3}}>{m.short}</div>
+              <Sparkline zoneCode={zone.zone_code} metric={mk} color={isA?T.gold:T.fog} w={52} h={18}/>
+            </div>
+            <span style={{fontFamily:T.mono,fontSize:12,color:isA?T.gold:T.mist,fontWeight:isA?500:400}}>{m.fmt(val)}</span>
+          </div>
+        )
+      })}
+      <div style={{marginTop:10,fontSize:8,color:T.fog,fontFamily:T.mono}}>{zone.zone_code} · {zone.lat?.toFixed(2)}°N {zone.lon?.toFixed(2)}°E</div>
+    </div>
+  )
 }
 
-export default function App() {
-  const [metric,   setMetric]   = useState('income')
-  const [year,     setYear]     = useState(2023)
-  const [data,     setData]     = useState([])
-  const [loading,  setLoading]  = useState(true)
-  const [source,   setSource]   = useState('fallback')
-  const [selected, setSelected] = useState(null)
-  const [panel,    setPanel]    = useState('map')
+/* ══ REALTIME FEED ══════════════════════════════════════════════ */
+function RealtimeFeed({events}){
+  if(!events.length)return null
+  return(
+    <div style={{borderTop:`1px solid ${T.border}`,padding:'8px 14px',maxHeight:130,overflowY:'auto',flexShrink:0}}>
+      <div style={{fontSize:8,textTransform:'uppercase',letterSpacing:'.14em',color:T.live,marginBottom:6,display:'flex',alignItems:'center',gap:6}}>
+        <LiveDot active/>LIVE UPDATES
+      </div>
+      {events.slice(0,8).map((ev,i)=>(
+        <div key={ev.id} className={i===0?'slide-in':''} style={{fontFamily:T.mono,fontSize:9,color:i===0?T.live:T.fog,padding:'2px 0',borderBottom:`1px solid ${T.border}`,display:'flex',gap:8,alignItems:'baseline',opacity:1-i*.1}}>
+          <span style={{color:T.gold,flexShrink:0}}>{ev.time}</span>
+          <span style={{color:T.mist,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1}}>{ev.zone_name}</span>
+          <span style={{flexShrink:0}}>{ev.fmt}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
 
-  useEffect(() => {
+/* ══ APP ════════════════════════════════════════════════════════ */
+export default function App(){
+  const[metric,setMetric]=useState('income')
+  const[year,setYear]=useState(2023)
+  const[data,setData]=useState([])
+  const[loading,setLoading]=useState(true)
+  const[source,setSource]=useState('fallback')
+  const[selected,setSelected]=useState(null)
+  const[panel,setPanel]=useState('map')
+  const[rtEvents,setRtEvents]=useState([])
+  const[flashZone,setFlashZone]=useState(null)
+  const[rtStatus,setRtStatus]=useState('connecting')
+
+  useEffect(()=>{
     setLoading(true)
-    fetchData(metric, year).then(({rows, source}) => {
-      setData(rows)
-      setSource(source)
-      setLoading(false)
-    })
-  }, [metric, year])
+    fetchData(metric,year).then(({rows,source})=>{setData(rows);setSource(source);setLoading(false)})
+  },[metric,year])
 
-  const domain     = useMemo(() => data.map(d=>d.value), [data])
-  const colorScale = useMemo(() => domain.length ? makeColorScale(domain, metric) : ()=>'#ccc', [domain, metric])
-  const sorted     = useMemo(() => [...data].sort((a,b)=>b.value-a.value), [data])
-  const natAvg     = data.length ? data.reduce((s,d)=>s+d.value,0)/data.length : 0
-  const selZone    = selected ? data.find(d=>d.zone_code===selected) : null
+  useEffect(()=>{
+    if(!isConfigured||!supabase){setRtStatus('off');return}
+    setRtStatus('connecting')
+    const channel=supabase.channel('eth-zone-metrics-live')
+      .on('postgres_changes',{event:'*',schema:'public',table:'eth_zone_metrics'},(payload)=>{
+        const row=payload.new||payload.old;if(!row)return
+        const now=new Date()
+        const timeStr=`${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`
+        const newEv={
+          id:`${Date.now()}-${Math.random()}`,time:timeStr,
+          zone_code:row.zone_code,zone_name:row.zone_name||row.zone_code,
+          metric:row.metric,year:row.year,value:row.value,
+          fmt:row.value!=null?METRICS[row.metric]?.fmt(row.value)??String(row.value):'—',
+          event:payload.eventType,
+        }
+        setRtEvents(prev=>[newEv,...prev].slice(0,20))
+        if(row.metric===metric&&row.year===year){
+          fetchData(metric,year).then(({rows,source})=>{setData(rows);setSource(source)})
+          setFlashZone(row.zone_code)
+          setTimeout(()=>setFlashZone(null),800)
+        }
+      })
+      .subscribe(status=>{
+        if(status==='SUBSCRIBED')setRtStatus('live')
+        else if(status==='CLOSED'||status==='CHANNEL_ERROR')setRtStatus('error')
+      })
+    return()=>{supabase.removeChannel(channel)}
+  },[metric,year])
 
-  // Typography
-  const serif  = "'Playfair Display', Georgia, serif"
-  const sans   = "'Source Sans 3', system-ui, sans-serif"
+  const domain=useMemo(()=>data.map(d=>d.value),[data])
+  const colorScale=useMemo(()=>domain.length?makeColorScale(domain,metric):()=>T.navyLt,[domain,metric])
+  const sorted=useMemo(()=>[...data].sort((a,b)=>b.value-a.value),[data])
+  const natAvg=data.length?data.reduce((s,d)=>s+d.value,0)/data.length:0
+  const selZone=selected?data.find(d=>d.zone_code===selected):null
+  const rtColor=rtStatus==='live'?T.live:rtStatus==='error'?T.accent:T.fog
 
-  return (
-    <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden',
-      fontFamily:sans,background:C.paper,color:C.ink}}>
+  return(
+    <>
+      <style>{CSS}</style>
+      <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden',fontFamily:T.sans,background:T.navy,color:'#fff'}}>
 
-      {/* ── Header ── */}
-      <header style={{borderBottom:`3px solid ${C.ink}`,padding:'13px 24px 10px',
-        display:'flex',alignItems:'flex-end',justifyContent:'space-between',
-        flexShrink:0,background:C.paper,gap:16,flexWrap:'wrap'}}>
-        <div>
-          <div style={{fontSize:10,letterSpacing:'.16em',textTransform:'uppercase',color:C.muted,marginBottom:4}}>
-            Ethiopia · Zone-level Atlas · {year}
-          </div>
-          <div style={{fontFamily:serif,fontSize:'clamp(16px,2.4vw,24px)',fontWeight:800,
-            letterSpacing:'-.02em',lineHeight:1.1}}>
-            Income &amp; Welfare across Ethiopia's Zones
-          </div>
-        </div>
-        <div style={{display:'flex',alignItems:'center',gap:8,flexShrink:0}}>
-          <div style={{width:7,height:7,borderRadius:'50%',flexShrink:0,
-            background: source==='supabase'?'#3FCF8E' : loading?C.gold:'#aaa',
-            transition:'background .4s'}}/>
-          <span style={{fontSize:10,color:source==='supabase'?'#3FCF8E':C.muted,letterSpacing:'.06em'}}>
-            {loading ? 'Loading…' : source==='supabase' ? 'Supabase live' : 'Built-in data'}
-          </span>
-          {source==='supabase' && (
-            <span style={{fontSize:9,background:'#1C1C1C',color:'#3FCF8E',padding:'2px 6px',
-              borderRadius:2,letterSpacing:'.06em',fontWeight:700}}>SUPABASE</span>
-          )}
-        </div>
-      </header>
-
-      {/* ── Controls ── */}
-      <div style={{borderBottom:`1px solid ${C.border}`,padding:'9px 24px',
-        display:'flex',alignItems:'center',gap:20,flexWrap:'wrap',
-        background:'#ece7dc',flexShrink:0}}>
-        {/* Metric buttons */}
-        <div style={{display:'flex'}}>
-          {Object.entries(METRICS).map(([k,m],i,arr)=>(
-            <button key={k} onClick={()=>setMetric(k)} style={{
-              padding:'5px 13px',fontSize:11,fontFamily:'inherit',cursor:'pointer',
-              border:`1px solid ${C.border}`,
-              borderRight: i<arr.length-1?'none':`1px solid ${C.border}`,
-              background: metric===k ? C.ink : 'transparent',
-              color:       metric===k ? C.paper : C.ink,
-              transition:'all .15s',letterSpacing:'.04em',
-            }}>{m.short}</button>
-          ))}
-        </div>
-        {/* Year chips */}
-        <div style={{display:'flex',alignItems:'center',gap:6}}>
-          <span style={{fontSize:10,textTransform:'uppercase',letterSpacing:'.12em',color:C.muted}}>Year</span>
-          {YEARS.map(y=>(
-            <button key={y} onClick={()=>setYear(y)} style={{
-              padding:'4px 10px',fontSize:11,fontFamily:'inherit',cursor:'pointer',
-              border:`1px solid ${year===y?C.accent:C.border}`,borderRadius:2,
-              background: year===y ? C.accent : 'transparent',
-              color:       year===y ? '#fff'    : C.ink,
-              transition:'all .15s',
-            }}>{y}</button>
-          ))}
-        </div>
-        {/* View toggle */}
-        <div style={{marginLeft:'auto',display:'flex'}}>
-          {['map','ranking'].map((p,i,arr)=>(
-            <button key={p} onClick={()=>setPanel(p)} style={{
-              padding:'4px 12px',fontSize:10,textTransform:'uppercase',letterSpacing:'.08em',
-              fontFamily:'inherit',cursor:'pointer',
-              border:`1px solid ${C.border}`,
-              borderRight:i<arr.length-1?'none':`1px solid ${C.border}`,
-              background: panel===p ? C.accent : 'transparent',
-              color:       panel===p ? '#fff'   : C.muted,
-            }}>{p}</button>
-          ))}
-        </div>
-      </div>
-
-      {/* ── KPI strip ── */}
-      <div style={{display:'flex',borderBottom:`2px solid ${C.ink}`,flexShrink:0,
-        overflowX:'auto',background:C.white}}>
-        {[
-          {label:'National average', value:METRICS[metric].fmt(natAvg),     sub:METRICS[metric].unit},
-          {label:'Highest zone',     value:sorted[0]?METRICS[metric].fmt(sorted[0].value):'—', sub:sorted[0]?.zone_name??''},
-          {label:'Lowest zone',      value:sorted.at(-1)?METRICS[metric].fmt(sorted.at(-1).value):'—', sub:sorted.at(-1)?.zone_name??''},
-          {label:'Zones tracked',    value:data.length, sub:'ADM2 administrative'},
-        ].map((k,i)=>(
-          <div key={i} style={{flex:1,minWidth:130,padding:'11px 18px',
-            borderRight:`1px solid ${C.border}`}}>
-            <div style={{fontSize:9,textTransform:'uppercase',letterSpacing:'.14em',color:C.muted}}>{k.label}</div>
-            <div style={{fontFamily:serif,fontSize:20,fontWeight:700,color:C.accent,lineHeight:1.15,marginTop:2}}>
-              {k.value}
+        {/* HEADER */}
+        <header style={{borderBottom:`1px solid ${T.border}`,padding:'10px 20px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0,background:T.navy,gap:16}}>
+          <div style={{display:'flex',alignItems:'baseline',gap:14}}>
+            <div style={{fontFamily:T.serif,fontSize:'clamp(14px,1.8vw,20px)',fontWeight:700,letterSpacing:'-.02em',color:'#fff',lineHeight:1.1}}>
+              Ethiopia Income Atlas
             </div>
-            <div style={{fontSize:10,color:C.muted,marginTop:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
-              {k.sub}
+            <div style={{fontSize:8,color:T.fog,textTransform:'uppercase',letterSpacing:'.16em',borderLeft:`1px solid ${T.border}`,paddingLeft:12}}>
+              Zone-level Welfare · {year}
             </div>
           </div>
-        ))}
-      </div>
+          <div style={{display:'flex',alignItems:'center',gap:8,flexShrink:0}}>
+            <LiveDot active={rtStatus==='live'}/>
+            <span style={{fontSize:8,color:rtColor,fontFamily:T.mono,letterSpacing:'.06em'}}>
+              {rtStatus==='live'?'LIVE':rtStatus==='connecting'?'CONNECTING…':rtStatus==='error'?'RT ERROR':source==='supabase'?'SUPABASE':'BUILT-IN'}
+            </span>
+            {rtEvents.length>0&&(
+              <span style={{fontFamily:T.mono,fontSize:8,background:T.live+'22',color:T.live,padding:'1px 6px',borderRadius:2,border:`1px solid ${T.live}44`}}>
+                {rtEvents.length} update{rtEvents.length!==1?'s':''}
+              </span>
+            )}
+          </div>
+        </header>
 
-      {/* ── Body ── */}
-      <div style={{display:'flex',flex:1,overflow:'hidden',minHeight:0}}>
-
-        {/* Map / ranking */}
-        <div style={{flex:1,position:'relative',background:'#ddd8cc',overflow:'hidden'}}>
-          {panel==='map' && data.length>0 && (
-            <EthMap
-              data={data}
-              metric={metric}
-              selected={selected}
-              onSelect={setSelected}
-              colorScale={colorScale}
-            />
-          )}
-          {panel==='ranking' && (
-            <RankingPanel data={data} metric={metric} selected={selected} onSelect={setSelected}/>
-          )}
-          {loading && (
-            <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',
-              justifyContent:'center',background:'rgba(244,239,230,.72)',
-              fontFamily:serif,fontSize:14,color:C.muted,zIndex:10}}>
-              Fetching from Supabase…
-            </div>
-          )}
-        </div>
-
-        {/* Sidebar */}
-        <div style={{width:260,flexShrink:0,borderLeft:`1px solid ${C.border}`,
-          background:C.white,display:'flex',flexDirection:'column',overflow:'hidden'}}>
-
-          <Legend colorScale={colorScale} domain={domain} metric={metric}/>
-          <hr style={{border:'none',borderTop:`1px solid ${C.border}`,margin:'12px 16px 0'}}/>
-
-          {/* Zone detail panel */}
-          <div style={{display:'flex',borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
-            {['Overview','Zone detail'].map((t,i)=>(
-              <button key={t} onClick={()=>i===0&&setSelected(null)}
-                disabled={i===1&&!selZone}
-                style={{flex:1,padding:7,fontSize:10,textTransform:'uppercase',
-                  letterSpacing:'.1em',background:'transparent',border:'none',
-                  cursor:i===1&&!selZone?'default':'pointer',fontFamily:'inherit',
-                  color: (i===0&&!selZone)||(i===1&&selZone) ? C.ink : C.muted,
-                  borderBottom:`2px solid ${(i===0&&!selZone)||(i===1&&selZone)?C.accent:'transparent'}`,
-                  transition:'all .15s'}}>
-                {t}
-              </button>
+        {/* CONTROLS */}
+        <div style={{borderBottom:`1px solid ${T.border}`,padding:'7px 20px',display:'flex',alignItems:'center',gap:18,flexWrap:'wrap',background:T.navyMid,flexShrink:0}}>
+          <div style={{display:'flex'}}>
+            {Object.entries(METRICS).map(([k,m])=>(
+              <button key={k} className={`btn m${metric===k?' active':''}`} onClick={()=>setMetric(k)}>{m.short}</button>
             ))}
           </div>
+          <div style={{display:'flex',alignItems:'center',gap:5}}>
+            <span style={{fontSize:8,textTransform:'uppercase',letterSpacing:'.14em',color:T.fog}}>Year</span>
+            {YEARS.map(y=><button key={y} className={`btn y${year===y?' active':''}`} onClick={()=>setYear(y)}>{y}</button>)}
+          </div>
+          <div style={{marginLeft:'auto',display:'flex',gap:5}}>
+            {['map','ranking'].map(p=><button key={p} className={`btn y${panel===p?' active':''}`} onClick={()=>setPanel(p)} style={{textTransform:'capitalize'}}>{p}</button>)}
+          </div>
+        </div>
 
-          {!selZone ? (
-            <div style={{padding:'12px 16px',fontSize:11,color:C.muted,fontStyle:'italic'}}>
-              {panel==='map'
-                ? 'Click a zone on the map to see detailed statistics.'
-                : 'Click a row in the ranking to see zone details.'}
+        {/* KPI STRIP */}
+        <div style={{display:'flex',borderBottom:`1px solid ${T.border}`,flexShrink:0,overflowX:'auto',background:T.navyMid}}>
+          {[
+            {label:'National average',val:METRICS[metric].fmt(natAvg),sub:METRICS[metric].unit},
+            {label:'Highest zone',val:sorted[0]?METRICS[metric].fmt(sorted[0].value):'—',sub:sorted[0]?.zone_name??''},
+            {label:'Lowest zone',val:sorted.at(-1)?METRICS[metric].fmt(sorted.at(-1).value):'—',sub:sorted.at(-1)?.zone_name??''},
+            {label:'Zones tracked',val:data.length,sub:'ADM2 zones'},
+          ].map((k,i)=>(
+            <div key={i} className="kpi">
+              <div style={{fontSize:7,textTransform:'uppercase',letterSpacing:'.16em',color:T.fog,marginBottom:3}}>{k.label}</div>
+              <div style={{fontFamily:T.mono,fontSize:17,fontWeight:500,color:T.gold,lineHeight:1.2}}>{k.val}</div>
+              <div style={{fontSize:9,color:T.fog,marginTop:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',fontStyle:'italic'}}>{k.sub}</div>
             </div>
-          ) : (
-            <div style={{padding:'12px 16px',flex:1,overflowY:'auto'}}>
-              <div style={{fontFamily:serif,fontWeight:700,fontSize:16,color:C.ink,lineHeight:1.2}}>
-                {selZone.zone_name}
+          ))}
+        </div>
+
+        {/* BODY */}
+        <div style={{display:'flex',flex:1,overflow:'hidden',minHeight:0}}>
+
+          {/* Map / Ranking */}
+          <div style={{flex:1,position:'relative',background:T.navyMid,overflow:'hidden'}}>
+            {panel==='map'&&data.length>0&&<EthMap data={data} metric={metric} selected={selected} onSelect={setSelected} colorScale={colorScale} flashZone={flashZone}/>}
+            {panel==='ranking'&&<RankingPanel data={data} metric={metric} selected={selected} onSelect={setSelected}/>}
+            {loading&&(
+              <div style={{position:'absolute',inset:0,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:T.navy+'dd',zIndex:10,gap:12}}>
+                <div style={{width:20,height:20,border:`2px solid ${T.border}`,borderTop:`2px solid ${T.gold}`,borderRadius:'50%',animation:'spin .8s linear infinite'}}/>
+                <span style={{fontSize:10,color:T.fog,fontFamily:T.mono,letterSpacing:'.1em'}}>LOADING…</span>
               </div>
-              <div style={{fontSize:10,color:C.muted,textTransform:'uppercase',
-                letterSpacing:'.08em',marginBottom:14}}>{selZone.region}</div>
-              {Object.keys(METRICS).map(mk=>{
-                const val = FALLBACK[mk][year].find(d=>d.zone_code===selZone.zone_code)?.value??0
-                const isActive = mk===metric
-                return (
-                  <div key={mk} style={{marginBottom:12}}>
-                    <div style={{fontSize:9,textTransform:'uppercase',letterSpacing:'.08em',color:C.muted}}>
-                      {METRICS[mk].label}
-                    </div>
-                    <div style={{fontFamily:serif,fontSize:18,fontWeight:700,lineHeight:1.2,
-                      color:isActive?C.accent:C.ink}}>
-                      {METRICS[mk].fmt(val)}
-                    </div>
-                    <Sparkline zoneCode={selZone.zone_code} metric={mk}
-                      color={isActive?C.accent:'#b8b0a0'}/>
-                  </div>
+            )}
+            {panel==='map'&&!loading&&(
+              <div style={{position:'absolute',bottom:8,left:10,fontSize:7,color:T.fog,fontFamily:T.mono,opacity:.55}}>
+                Synthetic zone boundaries · Production: HDX geoBoundaries ETH ADM2
+              </div>
+            )}
+          </div>
+
+          {/* SIDEBAR */}
+          <div style={{width:246,flexShrink:0,borderLeft:`1px solid ${T.border}`,background:T.navy,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+            <Legend colorScale={colorScale} domain={domain} metric={metric}/>
+            <div style={{display:'flex',flexShrink:0}}>
+              {['Zone detail','Overview'].map((t,i)=>{
+                const active=i===0?!!selZone:!selZone
+                return(
+                  <button key={t} onClick={()=>i===1&&setSelected(null)} disabled={i===0&&!selZone}
+                    style={{flex:1,padding:'7px',fontSize:8,textTransform:'uppercase',letterSpacing:'.1em',background:'transparent',border:'none',borderBottom:`2px solid ${active?T.accent:'transparent'}`,cursor:(i===0&&!selZone)?'default':'pointer',fontFamily:T.sans,color:active?'#fff':T.fog,transition:'all .15s'}}>
+                    {t}
+                  </button>
                 )
               })}
             </div>
-          )}
-
-          {/* Source note */}
-          <div style={{padding:'9px 16px',borderTop:`1px solid ${C.border}`,
-            fontSize:9,color:C.muted,lineHeight:1.55,flexShrink:0}}>
-            <strong style={{color:C.ink}}>Backend</strong>{' '}
-            <span style={{background:'#1C1C1C',color:'#3FCF8E',fontSize:8,padding:'1px 5px',
-              borderRadius:2,letterSpacing:'.06em',fontWeight:700}}>SUPABASE</span><br/>
-            Table: <code>eth_zone_metrics</code>.<br/>
-            Falls back to CSA/World Bank data when not configured.<br/><br/>
-            <strong style={{color:C.ink}}>Data</strong> CSA HCES 2015/16 ·{' '}
-            World Bank Poverty Assessment 2020 · IFPRI Zone Profiles.
+            <div style={{flex:1,overflowY:'auto',minHeight:0}}>
+              <ZoneDetail zone={selZone} metric={metric} year={year}/>
+            </div>
+            <RealtimeFeed events={rtEvents}/>
+            <div style={{padding:'7px 14px',borderTop:`1px solid ${T.border}`,fontSize:7,color:T.fog,lineHeight:1.7,flexShrink:0}}>
+              <span style={{color:'rgba(255,255,255,.5)',fontWeight:500}}>Data</span> CSA HCES 2015–23 · World Bank 2020 · IFPRI<br/>
+              <span style={{color:'rgba(255,255,255,.5)',fontWeight:500}}>Backend</span>{' '}
+              <span style={{fontFamily:T.mono,fontSize:7,background:source==='supabase'?T.live+'22':T.navyLt,color:source==='supabase'?T.live:T.fog,padding:'1px 4px',borderRadius:2,border:`1px solid ${source==='supabase'?T.live+'44':T.border}`}}>
+                {source==='supabase'?'SUPABASE LIVE':'BUILT-IN'}
+              </span>
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </>
   )
 }
