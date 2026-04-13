@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { scaleQuantile } from 'd3-scale'
-import 'leaflet/dist/leaflet.css'
-import L from 'leaflet'
+
+// Leaflet loaded globally via CDN in index.html — window.L is always available
 
 const RAMPS = {
   income:  ['#fef9e7','#fce8b0','#f8c86a','#f0a830','#e07820','#c04812','#8b2008'],
@@ -9,33 +9,26 @@ const RAMPS = {
   hdi:     ['#f0f7f6','#c8e8e5','#94d0cb','#58b0a8','#2a8880','#006f6a','#004d48'],
 }
 
-function getColor(value, values, metric) {
-  if (value == null) return '#d4cfc4'
-  const domain = values.filter(v => v != null)
-  if (!domain.length) return '#d4cfc4'
-  const q = scaleQuantile().domain(domain).range(RAMPS[metric])
-  return q(value)
+function getColor(value, domain, metric) {
+  if (value == null || !domain.length) return '#ccc8be'
+  return scaleQuantile().domain(domain).range(RAMPS[metric])(value)
 }
 
 export default function Map({ geoData, valueMap, metric, selected, onSelect }) {
-  const containerRef = useRef(null)
-  const mapRef       = useRef(null)
-  const geoLayerRef  = useRef(null)
+  const divRef      = useRef(null)
+  const mapRef      = useRef(null)
+  const layerRef    = useRef(null)
 
-  // Init Leaflet map once
+  // Init map once
   useEffect(() => {
-    if (!containerRef.current || mapRef.current) return
+    if (!divRef.current || mapRef.current) return
+    const L = window.L
+    if (!L) return
 
-    const map = L.map(containerRef.current, {
-      center: [9.0, 39.5],
-      zoom: 6,
-      zoomControl: true,
-      scrollWheelZoom: true,
-    })
+    const map = L.map(divRef.current).setView([9.0, 39.5], 6)
 
-    // Free OpenStreetMap tiles — no API key needed
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      attribution: '© OpenStreetMap contributors',
       maxZoom: 18,
     }).addTo(map)
 
@@ -43,69 +36,41 @@ export default function Map({ geoData, valueMap, metric, selected, onSelect }) {
     return () => { map.remove(); mapRef.current = null }
   }, [])
 
-  // Re-draw GeoJSON layer when data/metric/selection changes
+  // Update GeoJSON layer when data changes
   useEffect(() => {
+    const L = window.L
     const map = mapRef.current
-    if (!map || !geoData?.features?.length) return
+    if (!L || !map || !geoData?.features?.length) return
 
-    // Remove old layer
-    if (geoLayerRef.current) {
-      geoLayerRef.current.remove()
-      geoLayerRef.current = null
-    }
+    if (layerRef.current) { layerRef.current.remove(); layerRef.current = null }
 
-    const values = Object.values(valueMap)
+    const domain = Object.values(valueMap).filter(v => v != null)
 
     const layer = L.geoJSON(geoData, {
-      style: (feature) => {
-        const zc  = feature.properties.zone_code
-        const val = valueMap[zc]
+      style: feat => {
+        const zc = feat.properties.zone_code
         const isSel = selected === zc
         return {
-          fillColor:   getColor(val, values, metric),
-          fillOpacity: 0.82,
-          color:       isSel ? '#1a1208' : '#ffffff',
+          fillColor:   getColor(valueMap[zc], domain, metric),
+          fillOpacity: 0.8,
+          color:       isSel ? '#1a1208' : '#fff',
           weight:      isSel ? 2 : 0.5,
           opacity:     1,
         }
       },
-      onEachFeature: (feature, layer) => {
-        const zc = feature.properties.zone_code
-        const zn = feature.properties.zone_name
-        const val = valueMap[zc]
-        layer.bindTooltip(zn, { sticky: true, className: 'map-tooltip' })
-        layer.on({
-          click: () => onSelect(zc),
-          mouseover: (e) => { e.target.setStyle({ fillOpacity: 1, weight: 1.5 }) },
-          mouseout:  (e) => { layer.resetStyle ? layer.resetStyle() : e.target.setStyle({ fillOpacity: 0.82, weight: selected === zc ? 2 : 0.5 }) },
-        })
+      onEachFeature: (feat, lyr) => {
+        const zc = feat.properties.zone_code
+        lyr.bindTooltip(feat.properties.zone_name, { sticky: true })
+        lyr.on('click', () => onSelect(zc))
+        lyr.on('mouseover', e => e.target.setStyle({ fillOpacity: 1 }))
+        lyr.on('mouseout',  e => e.target.setStyle({ fillOpacity: 0.8 }))
       },
     }).addTo(map)
 
-    geoLayerRef.current = layer
-
-    // Fit map to Ethiopia bounds on first load
-    if (Object.keys(valueMap).length === 0 || !mapRef.current._fittedBounds) {
-      map.fitBounds(layer.getBounds(), { padding: [10, 10] })
-      mapRef.current._fittedBounds = true
-    }
+    // Fit to bounds on first data load
+    if (!map._fitted) { map.fitBounds(layer.getBounds(), { padding: [10,10] }); map._fitted = true }
+    layerRef.current = layer
   }, [geoData, valueMap, metric, selected])
 
-  return (
-    <>
-      <style>{`
-        .map-tooltip {
-          background: rgba(26,18,8,0.88);
-          color: #fff;
-          border: none;
-          border-radius: 2px;
-          padding: 3px 7px;
-          font-size: 11px;
-          font-family: 'Noto Sans', system-ui, sans-serif;
-        }
-        .leaflet-container { font-family: 'Noto Sans', system-ui, sans-serif; }
-      `}</style>
-      <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
-    </>
-  )
+  return <div ref={divRef} style={{ width:'100%', height:'100%' }}/>
 }
