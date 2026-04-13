@@ -1,17 +1,17 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
-import * as d3geo from 'd3-geo'
+import { geoMercator, geoPath } from 'd3-geo'
 import { scaleQuantile } from 'd3-scale'
 import { extent } from 'd3-array'
 import { supabase, isConfigured } from './supabase'
 
-/* ─── ECONOMIST PALETTE ──────────────────────────────────────── */
+/* ─── PALETTE ────────────────────────────────────────────────── */
 const C = {
-  paper: '#ffffff', tint: '#f4f1eb', rule: '#d5cfc4',
-  heavy: '#1a1208', mid: '#4a4438', light: '#8a8070',
-  red: '#e2001a', redBg: '#fff5f6',
-  serif: "'Noto Serif','Georgia',serif",
-  sans:  "'Noto Sans','Helvetica Neue',system-ui,sans-serif",
-  mono:  "'Noto Sans Mono','Courier New',monospace",
+  paper:'#ffffff', tint:'#f4f1eb', rule:'#d5cfc4',
+  heavy:'#1a1208', mid:'#4a4438', light:'#8a8070',
+  red:'#e2001a', redBg:'#fff5f6',
+  serif:"'Noto Serif','Georgia',serif",
+  sans:"'Noto Sans','Helvetica Neue',system-ui,sans-serif",
+  mono:"'Noto Sans Mono','Courier New',monospace",
 }
 
 /* ─── METRICS ────────────────────────────────────────────────── */
@@ -41,13 +41,12 @@ const REGION_BASE = {
   'Benshangul-Gumuz':{i:10000,p:66,h:.35},'Gambella':{i:10500,p:64,h:.36},
   'Afar':{i:8500,p:72,h:.31},
 }
-const YEARS = [2015,2017,2019,2021,2023]
+const YEARS=[2015,2017,2019,2021,2023]
 function prng(s){let h=0;for(let i=0;i<String(s).length;i++)h=(Math.imul(31,h)+String(s).charCodeAt(i))|0;return(h>>>0)/0xffffffff}
-
-function buildFallback(zones, metric, year) {
-  const gf=1+(year-2015)*0.055, map={}
+function buildFallback(zones,metric,year){
+  const gf=1+(year-2015)*0.055,map={}
   for(const z of zones){
-    const b=REGION_BASE[z.region]??{i:11000,p:60,h:.38}, j=0.8+prng(z.zone_code+year)*0.4
+    const b=REGION_BASE[z.region]??{i:11000,p:60,h:.38},j=0.8+prng(z.zone_code+year)*0.4
     let v
     if(metric==='income')v=Math.round(b.i*gf*j)
     else if(metric==='poverty')v=+((b.p*(1-(year-2015)*0.015)*j).toFixed(1))
@@ -88,95 +87,80 @@ function Sparkline({values,color,w=88,h=26}){
   return <canvas ref={ref} style={{width:w,height:h,display:'block'}}/>
 }
 
-/* ─── D3 CHOROPLETH MAP ──────────────────────────────────────── 
-   Pure D3-geo SVG. Uses fitSize() to auto-fit Ethiopia's bbox.
-   This is how NYT / FT / Economist maps actually work.
+/* ─── MAP — React SVG + D3 math only ────────────────────────────
+   D3 computes the projection and path strings.
+   React renders them as JSX <path> elements.
+   No imperative DOM manipulation — no timing bugs.
 ──────────────────────────────────────────────────────────────── */
-function D3Map({geoData, valueMap, metric, selected, onSelect, flashZone}){
-  const svgRef = useRef(null)
+function ChoroplethMap({geoData, valueMap, metric, selected, onSelect, flashZone}){
   const containerRef = useRef(null)
-  const pathsRef = useRef({})          // zone_code → <path> element
-  const [dims, setDims] = useState({w:800,h:600})
+  const [dims, setDims] = useState(null)
 
-  // Observe container size
   useEffect(()=>{
-    if(!containerRef.current)return
-    const ro = new ResizeObserver(entries=>{
-      const{width,height}=entries[0].contentRect
-      if(width>0&&height>0)setDims({w:width,h:height})
+    const el = containerRef.current
+    if(!el)return
+    // Set initial size immediately
+    const r = el.getBoundingClientRect()
+    if(r.width>0&&r.height>0) setDims({w:r.width,h:r.height})
+    const ro = new ResizeObserver(([entry])=>{
+      const{width,height}=entry.contentRect
+      if(width>0&&height>0) setDims({w:width,h:height})
     })
-    ro.observe(containerRef.current)
+    ro.observe(el)
     return()=>ro.disconnect()
   },[])
 
-  // Draw map whenever geo or dims change
-  useEffect(()=>{
-    if(!geoData||!svgRef.current||dims.w<10)return
-    const {w,h} = dims
-    const svg = svgRef.current
-
-    // Auto-fit projection to the GeoJSON bounds — the correct way
-    const projection = d3geo.geoMercator().fitSize([w,h], geoData)
-    const pathGen = d3geo.geoPath().projection(projection)
-
-    // Clear
-    while(svg.firstChild)svg.removeChild(svg.firstChild)
-    pathsRef.current = {}
-
-    // Background
-    svg.setAttribute('width', w)
-    svg.setAttribute('height', h)
-
-    const g = document.createElementNS('http://www.w3.org/2000/svg','g')
-    svg.appendChild(g)
-
+  // Compute projection + all path strings when geo or dims change
+  const {pathStrings, colorFn} = useMemo(()=>{
+    if(!geoData||!dims) return {pathStrings:{}, colorFn:()=>'#ece7dc'}
+    const proj = geoMercator().fitSize([dims.w, dims.h], geoData)
+    const gen  = geoPath().projection(proj)
+    const ps   = {}
     for(const feat of geoData.features){
-      const zc = feat.properties.zone_code
-      const d = pathGen(feat)
-      if(!d)continue
-
-      const path = document.createElementNS('http://www.w3.org/2000/svg','path')
-      path.setAttribute('d', d)
-      path.setAttribute('data-zc', zc)
-      path.style.cursor = 'pointer'
-      path.style.transition = 'opacity .15s'
-      path.addEventListener('click', ()=> onSelect(zc))
-      g.appendChild(path)
-      pathsRef.current[zc] = path
+      const d = gen(feat)
+      if(d) ps[feat.properties.zone_code] = d
     }
-  },[geoData, dims])
-
-  // Update fill colors when values/metric/selection change — no re-render
-  useEffect(()=>{
-    const domain = Object.values(valueMap).filter(Boolean)
-    if(!domain.length)return
-    const colorFn = makeColor(domain, metric)
-    for(const [zc, path] of Object.entries(pathsRef.current)){
-      const val = valueMap[zc]
-      const isSel = zc === selected
-      const isFlash = zc === flashZone
-      path.setAttribute('fill', val!=null ? colorFn(val) : '#ece7dc')
-      path.setAttribute('stroke', isSel ? C.heavy : C.paper)
-      path.setAttribute('stroke-width', isSel ? '1.5' : '0.4')
-      path.style.opacity = isFlash ? '0.3' : isSel ? '1' : '0.88'
-      path.style.filter = isSel ? 'brightness(0.88)' : 'none'
-    }
-  },[valueMap, metric, selected, flashZone])
+    const domain = Object.values(valueMap).filter(v=>v!=null)
+    const cf = domain.length ? makeColor(domain, metric) : ()=>'#ece7dc'
+    return {pathStrings:ps, colorFn:cf}
+  }, [geoData, dims, valueMap, metric])
 
   return(
-    <div ref={containerRef} style={{width:'100%',height:'100%',position:'relative',background:C.paper}}>
-      {!geoData&&(
+    <div ref={containerRef} style={{width:'100%',height:'100%',position:'relative',background:'#e8e4db'}}>
+      {!dims&&(
         <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',gap:10,color:C.light}}>
           <div style={{width:16,height:16,border:`1.5px solid ${C.rule}`,borderTop:`1.5px solid ${C.red}`,borderRadius:'50%',animation:'spin .8s linear infinite'}}/>
-          Loading map…
+          Loading…
         </div>
       )}
-      <svg ref={svgRef} style={{width:'100%',height:'100%',display:'block'}}/>
-      {geoData&&(
-        <div style={{position:'absolute',bottom:6,left:8,fontSize:8,color:C.light,fontFamily:C.mono,background:'rgba(255,255,255,.85)',padding:'2px 5px',borderRadius:1}}>
-          Approximate ADM2 boundaries · scroll to zoom
-        </div>
+      {dims&&(
+        <svg
+          width={dims.w}
+          height={dims.h}
+          style={{display:'block',position:'absolute',top:0,left:0}}
+        >
+          {Object.entries(pathStrings).map(([zc, d])=>{
+            const val   = valueMap[zc]
+            const isSel = selected===zc
+            const isFlash = flashZone===zc
+            return(
+              <path
+                key={zc}
+                d={d}
+                fill={val!=null ? colorFn(val) : '#ddd8cc'}
+                stroke={isSel ? C.heavy : '#ffffff'}
+                strokeWidth={isSel ? 1.5 : 0.5}
+                opacity={isFlash ? 0.4 : isSel ? 1 : 0.88}
+                style={{cursor:'pointer',transition:'opacity .15s, fill .3s'}}
+                onClick={()=>onSelect(zc)}
+              />
+            )
+          })}
+        </svg>
       )}
+      <div style={{position:'absolute',bottom:6,left:8,fontSize:8,color:C.light,fontFamily:C.mono,background:'rgba(255,255,255,.85)',padding:'2px 5px',borderRadius:1,pointerEvents:'none'}}>
+        Approximate ADM2 boundaries · {Object.keys(pathStrings).length} zones
+      </div>
     </div>
   )
 }
@@ -205,52 +189,47 @@ export default function App(){
   const[year,    setYear]    = useState(2023)
   const[selected,setSelected]= useState(null)
   const[panel,   setPanel]   = useState('map')
-  const[src,     setSrc]     = useState({data:'…'})
+  const[dataSrc, setDataSrc] = useState('…')
   const[rtLog,   setRtLog]   = useState([])
   const[flash,   setFlash]   = useState(null)
   const[rtLive,  setRtLive]  = useState(false)
 
-  /* Load GeoJSON */
+  // 1. Load GeoJSON — extract zones list from it immediately
   useEffect(()=>{
     fetch('/eth_zones.geojson').then(r=>r.json()).then(gj=>{
       setGeoData(gj)
-      // Extract zones list from geojson if Supabase not available
-      const zList = gj.features.map(f=>({
+      setZones(gj.features.map(f=>({
         zone_code:f.properties.zone_code,
         zone_name:f.properties.zone_name,
         region:f.properties.region,
-        lat:0,lon:0
-      }))
-      setZones(zList)
+      })))
     })
   },[])
 
-  /* Load zones + values */
+  // 2. Load values whenever metric/year/geo changes
   useEffect(()=>{
-    if(!zones.length&&!geoData)return
+    if(!zones.length)return
     let live=true
-    async function load(){
+    ;(async()=>{
       const dbZones = await fetchZones()
-      const zList = dbZones ?? zones
-      if(live&&dbZones)setZones(dbZones)
-
+      const zList = dbZones??zones
+      if(live&&dbZones) setZones(dbZones)
       const dbVals = await fetchValues(metric,year)
       if(!live)return
-      if(dbVals){setValues(dbVals);setSrc({data:'supabase'})}
-      else{setValues(buildFallback(zList,metric,year));setSrc({data:'built-in'})}
-    }
-    load()
+      if(dbVals){setValues(dbVals);setDataSrc('supabase')}
+      else{setValues(buildFallback(zList,metric,year));setDataSrc('built-in')}
+    })()
     return()=>{live=false}
-  },[metric,year,geoData])
+  },[metric,year,zones.length])
 
-  /* Realtime */
+  // 3. Realtime subscription
   useEffect(()=>{
     if(!isConfigured||!supabase)return
     const ch=supabase.channel('eth-live')
-      .on('postgres_changes',{event:'*',schema:'public',table:'eth_zone_metrics'},payload=>{
-        const row=payload.new||payload.old;if(!row)return
+      .on('postgres_changes',{event:'*',schema:'public',table:'eth_zone_metrics'},p=>{
+        const row=p.new||p.old;if(!row)return
         const now=new Date()
-        const t=`${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`
+        const t=`${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`
         setRtLog(prev=>[{id:Date.now(),t,zc:row.zone_code,
           zn:zones.find(z=>z.zone_code===row.zone_code)?.zone_name||row.zone_code,
           val:row.value,metric:row.metric},...prev].slice(0,12))
@@ -264,26 +243,28 @@ export default function App(){
   },[zones,metric,year])
 
   /* Derived */
-  const domain  = useMemo(()=>Object.values(values).filter(Boolean),[values])
-  const sorted  = useMemo(()=>[...zones].sort((a,b)=>(values[b.zone_code]??0)-(values[a.zone_code]??0)),[zones,values])
-  const avg     = domain.length?domain.reduce((s,v)=>s+v,0)/domain.length:0
-  const[lo,hi]  = extent(domain.length?domain:[0,1])
-  const selZ    = selected?zones.find(z=>z.zone_code===selected):null
-  const selVal  = selected?values[selected]:null
-  const m       = M[metric]
+  const domain = useMemo(()=>Object.values(values).filter(v=>v!=null),[values])
+  const sorted = useMemo(()=>[...zones].sort((a,b)=>(values[b.zone_code]??0)-(values[a.zone_code]??0)),[zones,values])
+  const avg    = domain.length?domain.reduce((s,v)=>s+v,0)/domain.length:0
+  const[lo,hi] = extent(domain.length?domain:[0,1])
+  const selZ   = selected?zones.find(z=>z.zone_code===selected):null
+  const selVal = selected?values[selected]:null
+  const m      = M[metric]
   const sparkData = useMemo(()=>{
     if(!selZ)return[]
-    return YEARS.map(y=>buildFallback([selZ],metric,y)[selZ.zone_code]).filter(Boolean)
+    return YEARS.map(y=>buildFallback([selZ],metric,y)[selZ.zone_code]).filter(v=>v!=null)
   },[selZ,metric])
 
-  function btn(label, active, onClick, mono=false){
+  function metricBtn(k,mm,i,arr){
+    const on=k===metric
     return(
-      <button onClick={onClick} style={{
-        padding:'4px 11px',fontSize:11,fontWeight:active?600:400,
-        border:`1px solid ${active?C.red:C.rule}`,borderRadius:2,
-        background:active?C.red:'transparent',color:active?'#fff':C.mid,
-        fontFamily:mono?C.mono:C.sans,transition:'all .15s',
-      }}>{label}</button>
+      <button key={k} onClick={()=>setMetric(k)} style={{
+        padding:'4px 13px',fontSize:11,fontWeight:on?600:400,
+        border:`1px solid ${on?C.red:C.rule}`,
+        borderRight:i<arr.length-1?'none':undefined,
+        borderRadius:i===0?'2px 0 0 2px':i===arr.length-1?'0 2px 2px 0':'0',
+        background:on?C.red:'transparent',color:on?'#fff':C.mid,transition:'all .15s',
+      }}>{mm.short}</button>
     )
   }
 
@@ -292,53 +273,48 @@ export default function App(){
       <style>{CSS}</style>
       <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden'}}>
 
-        {/* RED STRIPE */}
         <div style={{background:C.red,height:5,flexShrink:0}}/>
 
-        {/* MASTHEAD */}
         <header style={{borderBottom:`2px solid ${C.heavy}`,padding:'8px 20px 7px',display:'flex',alignItems:'flex-end',justifyContent:'space-between',gap:16,flexShrink:0}}>
           <div>
-            <div style={{fontSize:9,textTransform:'uppercase',letterSpacing:'.18em',color:C.light,marginBottom:3}}>
-              Ethiopia · Zone-level Welfare Atlas
-            </div>
+            <div style={{fontSize:9,textTransform:'uppercase',letterSpacing:'.18em',color:C.light,marginBottom:3}}>Ethiopia · Zone-level Welfare Atlas</div>
             <h1 style={{fontFamily:C.serif,fontSize:'clamp(14px,1.6vw,20px)',fontWeight:700,letterSpacing:'-.025em',lineHeight:1.15}}>
               Income &amp; Human Development across Ethiopia's Administrative Zones
             </h1>
           </div>
           <div style={{display:'flex',alignItems:'center',gap:8,flexShrink:0,paddingBottom:2}}>
             {rtLive&&<span style={{display:'flex',alignItems:'center',gap:4,fontSize:10,color:C.light}}>
-              <span style={{width:6,height:6,borderRadius:'50%',background:'#00a878',display:'inline-block',animation:'pulse 1.5s ease-in-out infinite'}}/>Live
+              <span style={{width:6,height:6,borderRadius:'50%',background:'#00a878',animation:'pulse 1.5s ease-in-out infinite',display:'inline-block'}}/>Live
             </span>}
-            <span style={{fontSize:10,color:C.light,fontFamily:C.mono}}>{src.data}</span>
+            <span style={{fontSize:10,color:C.light,fontFamily:C.mono}}>{dataSrc}</span>
           </div>
         </header>
 
-        {/* CONTROLS */}
         <div style={{background:C.tint,borderBottom:`1px solid ${C.rule}`,padding:'6px 20px',display:'flex',alignItems:'center',gap:12,flexShrink:0,flexWrap:'wrap'}}>
-          <div style={{display:'flex',gap:0}}>
-            {Object.entries(M).map(([k,mm],i,arr)=>{
-              const on=k===metric
-              return(
-                <button key={k} onClick={()=>setMetric(k)} style={{
-                  padding:'4px 13px',fontSize:11,fontWeight:on?600:400,
-                  border:`1px solid ${on?C.red:C.rule}`,
-                  borderRight:i<arr.length-1?'none':`1px solid ${on?C.red:C.rule}`,
-                  borderRadius:i===0?'2px 0 0 2px':i===arr.length-1?'0 2px 2px 0':'0',
-                  background:on?C.red:'transparent',color:on?'#fff':C.mid,transition:'all .15s',
-                }}>{mm.short}</button>
-              )
-            })}
+          <div style={{display:'flex'}}>
+            {Object.entries(M).map(([k,mm],i,arr)=>metricBtn(k,mm,i,arr))}
           </div>
           <div style={{display:'flex',alignItems:'center',gap:5}}>
             <span style={{fontSize:9,textTransform:'uppercase',letterSpacing:'.1em',color:C.light}}>Year</span>
-            {YEARS.map(y=>btn(y,y===year,()=>setYear(y),true))}
+            {YEARS.map(y=>(
+              <button key={y} onClick={()=>setYear(y)} style={{
+                padding:'4px 9px',fontSize:11,fontFamily:C.mono,
+                border:`1px solid ${y===year?C.heavy:C.rule}`,borderRadius:2,
+                background:y===year?C.heavy:'transparent',color:y===year?'#fff':C.mid,transition:'all .15s',
+              }}>{y}</button>
+            ))}
           </div>
           <div style={{marginLeft:'auto',display:'flex',gap:4}}>
-            {['map','ranking'].map(p=>btn(p,p===panel,()=>setPanel(p)))}
+            {['map','ranking'].map(p=>(
+              <button key={p} onClick={()=>setPanel(p)} style={{
+                padding:'4px 11px',fontSize:11,textTransform:'capitalize',
+                border:`1px solid ${p===panel?C.heavy:C.rule}`,borderRadius:2,
+                background:p===panel?C.heavy:'transparent',color:p===panel?'#fff':C.mid,transition:'all .15s',
+              }}>{p}</button>
+            ))}
           </div>
         </div>
 
-        {/* KPI STRIP */}
         <div style={{display:'flex',borderBottom:`1px solid ${C.rule}`,flexShrink:0,overflowX:'auto'}}>
           {[
             {label:'National avg.',val:domain.length?m.fmt(avg):'—',sub:m.unit},
@@ -354,13 +330,11 @@ export default function App(){
           ))}
         </div>
 
-        {/* BODY */}
         <div style={{display:'flex',flex:1,overflow:'hidden',minHeight:0}}>
 
-          {/* MAP / RANKING */}
           <div style={{flex:1,overflow:'hidden',position:'relative'}}>
             {panel==='map'&&(
-              <D3Map
+              <ChoroplethMap
                 geoData={geoData}
                 valueMap={values}
                 metric={metric}
@@ -397,21 +371,17 @@ export default function App(){
             )}
           </div>
 
-          {/* SIDEBAR */}
           <div style={{width:240,flexShrink:0,borderLeft:`1px solid ${C.rule}`,display:'flex',flexDirection:'column',overflow:'hidden'}}>
-
-            {/* Legend */}
             <div style={{padding:'11px 14px 10px',borderBottom:`1px solid ${C.rule}`}}>
               <div style={{fontSize:9,textTransform:'uppercase',letterSpacing:'.12em',color:C.light,marginBottom:6}}>{m.label}</div>
               <div style={{display:'flex',height:8,borderRadius:1,overflow:'hidden',marginBottom:4}}>
-                {m.ramp.map((c,i)=><div key={i} style={{flex:1,background:c}}/>)}
+                {m.ramp.map((col,i)=><div key={i} style={{flex:1,background:col}}/>)}
               </div>
               <div style={{display:'flex',justifyContent:'space-between',fontSize:9,fontFamily:C.mono,color:C.light}}>
                 <span>{domain.length?m.mini(lo):'—'}</span><span>{domain.length?m.mini(hi):'—'}</span>
               </div>
             </div>
 
-            {/* Tabs */}
             <div style={{display:'flex',borderBottom:`1px solid ${C.rule}`,flexShrink:0}}>
               {['Zone','Overview'].map((t,i)=>{
                 const active=i===0?!!selZ:!selZ
@@ -426,7 +396,6 @@ export default function App(){
               })}
             </div>
 
-            {/* Zone detail / overview */}
             <div style={{flex:1,overflowY:'auto',minHeight:0}}>
               {selZ?(
                 <div className="fadein" style={{padding:'12px 14px'}}>
@@ -467,11 +436,10 @@ export default function App(){
               )}
             </div>
 
-            {/* Realtime feed */}
             {rtLog.length>0&&(
               <div style={{borderTop:`1px solid ${C.rule}`,padding:'7px 14px',maxHeight:120,overflowY:'auto',flexShrink:0,background:C.tint}}>
                 <div style={{fontSize:8,textTransform:'uppercase',letterSpacing:'.12em',color:C.red,marginBottom:5,display:'flex',alignItems:'center',gap:5}}>
-                  <span style={{width:5,height:5,borderRadius:'50%',background:C.red,display:'inline-block',animation:'pulse 1.5s ease-in-out infinite'}}/>Live updates
+                  <span style={{width:5,height:5,borderRadius:'50%',background:C.red,animation:'pulse 1.5s ease-in-out infinite',display:'inline-block'}}/>Live updates
                 </div>
                 {rtLog.slice(0,6).map((ev,i)=>(
                   <div key={ev.id} style={{fontFamily:C.mono,fontSize:9,display:'flex',gap:7,padding:'2px 0',borderBottom:`1px solid ${C.rule}`,color:i===0?C.heavy:C.light,opacity:1-i*.12}}>
