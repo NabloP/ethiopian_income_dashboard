@@ -12,100 +12,6 @@ function getColor(value, domain, metric) {
   return scaleQuantile().domain(domain).range(RAMPS[metric])(value)
 }
 
-// Precise mapping from geoBoundaries shapeName → our zone_code
-// Built from actual shapefile inspection (74 features)
-const NAME_TO_CODE = {
-  // Tigray (5)
-  'Central':           'ET010100',  // Tigray Central
-  'Eastern\n':         'ET010200',  // Tigray Eastern (has trailing newline in source)
-  'Eastern':           'ET010200',
-  'North Western':     'ET010300',  // Tigray NW
-  'Southern':          'ET010400',  // Tigray Southern
-  'Western':           'ET010500',  // Tigray Western
-  // Afar (5)
-  'Zone 1':            'ET020100',  // Awsi Rasu
-  'Zone 2':            'ET020200',  // Kilbati Rasu
-  'Zone 3':            'ET020300',  // Gabi Rasu
-  'Zone 4':            'ET020400',  // Fantana Rasu
-  'Zone 5':            'ET020500',  // Hari Rasu
-  // Amhara (9)
-  'Wag Himra':         'ET030100',
-  'North Wollo':       'ET030200',
-  'South Wollo':       'ET030300',
-  'East Gojam':        'ET030500',
-  'West Gojam':        'ET030600',
-  'Awi/Agew':          'ET030700',
-  'North Gonder':      'ET030900',
-  'South Gonder':      'ET031000',
-  'North Shewa(R3)':   'ET031100',  // North Shewa Amhara
-  // Oromia (14)
-  'West Harerge':      'ET040100',
-  'East Harerge':      'ET040200',
-  'Arsi':              'ET040300',
-  'Bale':              'ET040400',
-  'Guji':              'ET040500',  // West Guji
-  'Borena':            'ET040700',
-  'West Shewa':        'ET040800',
-  'North Shewa(R4)':   'ET040900',  // North Shewa Oromia
-  'East Shewa':        'ET041000',
-  'Jimma':             'ET041100',
-  'Ilubabor':          'ET041200',
-  'Kelem Wellega':     'ET041300',
-  'East Wellega':      'ET041400',
-  'West Wellega':      'ET041500',
-  'Horo Guduru':       'ET041400',  // part of East Wellega area
-  'South West Shewa':  'ET040800',
-  // Somali (7)
-  'Fafan':             'ET050100',  // replaces Jijiga in new admin
-  'Jarar':             'ET050200',  // replaces Fik
-  'Afder':             'ET050700',  // Gode / Afder
-  'Liben':             'ET050400',
-  'Korahe':            'ET050600',
-  'Nogob':             'ET050300',  // Warder / Nogob
-  'Shabelle':          'ET050500',  // Degehabur / Shabelle
-  'Doolo':             'ET050300',
-  'Siti':              'ET050100',
-  // Benshangul-Gumuz (3)
-  'Metekel':           'ET060100',
-  'Asosa':             'ET060200',
-  'Kemashi':           'ET060300',
-  // SNNPR/Southwest (9)
-  'Gurage':            'ET070100',
-  'Sidama':            'ET070200',
-  'Wolayita':          'ET070300',
-  'Gamo Gofa':         'ET070400',
-  'Dawro':             'ET070500',
-  'Hadiya':            'ET070600',
-  'KT':                'ET070700',  // Kambata Tambaro
-  'Bench Maji':        'ET070800',
-  'South Omo':         'ET070900',
-  'Keffa':             'ET070800',
-  'Sheka':             'ET070800',
-  'Alaba':             'ET070600',
-  'Selti':             'ET070100',
-  'Gedio':             'ET070200',
-  'Konta':             'ET070500',
-  'Basketo':           'ET070800',
-  'West Arsi':         'ET040300',
-  'Yem':               'ET070700',
-  'Special Woreda':    'ET070200',
-  'Segen Peoples\'':   'ET070900',
-  'Majang':            'ET120100',
-  // Gambella (2)
-  'Agnuak':            'ET120100',
-  'Nuer':              'ET120200',
-  // City-states
-  'Hareri':            'ET130100',
-  'Oromia':            'ET040900',  // Addis Ababa surrounding Oromia special zone
-  'Region 14':         'ET140100',  // Addis Ababa
-  'Dire Dawa':         'ET150100',
-}
-
-function resolveCode(props) {
-  const name = (props.shapeName || '').trim()
-  return NAME_TO_CODE[name] || NAME_TO_CODE[name + '\n'] || null
-}
-
 export default function Map({ geoData, valueMap, metric, selected, onSelect }) {
   const divRef   = useRef(null)
   const mapRef   = useRef(null)
@@ -127,7 +33,7 @@ export default function Map({ geoData, valueMap, metric, selected, onSelect }) {
     return () => { map.remove(); mapRef.current = null }
   }, [])
 
-  // Redraw GeoJSON layer on data/metric/selection change
+  // Redraw layer when data/metric/selection changes
   useEffect(() => {
     const L = window.L
     const map = mapRef.current
@@ -139,7 +45,7 @@ export default function Map({ geoData, valueMap, metric, selected, onSelect }) {
 
     const layer = L.geoJSON(geoData, {
       style: feat => {
-        const zc = feat.properties._zc
+        const zc = feat.properties.zone_code   // pre-attached server-side
         const isSel = selected === zc
         return {
           fillColor:   getColor(valueMap[zc], domain, metric),
@@ -150,11 +56,7 @@ export default function Map({ geoData, valueMap, metric, selected, onSelect }) {
         }
       },
       onEachFeature: (feat, lyr) => {
-        // Cache zone_code on the feature properties
-        if (!feat.properties._zc) {
-          feat.properties._zc = feat.properties.zone_code || resolveCode(feat.properties)
-        }
-        const zc   = feat.properties._zc
+        const zc   = feat.properties.zone_code
         const name = feat.properties.shapeName || feat.properties.zone_name || zc || '—'
         lyr.bindTooltip(name, { sticky: true, className: 'map-tip' })
         lyr.on('click',     ()  => onSelect(zc))
@@ -184,7 +86,6 @@ export default function Map({ geoData, valueMap, metric, selected, onSelect }) {
           padding: 4px 9px;
           font-size: 11px;
           font-family: 'Noto Sans', sans-serif;
-          box-shadow: 0 1px 4px rgba(0,0,0,.3);
         }
       `}</style>
       <div ref={divRef} style={{ width: '100%', height: '100%' }} />
