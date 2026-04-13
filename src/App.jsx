@@ -118,16 +118,36 @@ export default function App(){
   const[flash,   setFlash]   = useState(null)
   const[rtLive,  setRtLive]  = useState(false)
 
-  // 1. Load GeoJSON — extract zones list from it immediately
+  // 1. Load GeoJSON — try real shapefile from API first, fall back to bundled
   useEffect(()=>{
-    fetch('/eth_zones.geojson').then(r=>r.json()).then(gj=>{
+    async function loadGeo() {
+      let gj = null
+      try {
+        const r = await fetch('/api/geodata')
+        if (r.ok) {
+          const data = await r.json()
+          if (data?.features?.length > 10) gj = data
+        }
+      } catch(e) { /* fall through */ }
+
+      // Fall back to bundled approximate shapes
+      if (!gj) {
+        const r = await fetch('/eth_zones.geojson')
+        gj = await r.json()
+      }
+
       setGeoData(gj)
-      setZones(gj.features.map(f=>({
-        zone_code:f.properties.zone_code,
-        zone_name:f.properties.zone_name,
-        region:f.properties.region,
-      })))
-    })
+      // Extract zone list — works for both real and bundled GeoJSON
+      const zList = gj.features
+        .map(f => ({
+          zone_code: f.properties.zone_code || f.properties._zc || f.properties.shapeID || '',
+          zone_name: f.properties.zone_name || f.properties.shapeName || f.properties.NAME_2 || '',
+          region:    f.properties.region    || f.properties.shapeName_1 || '',
+        }))
+        .filter(z => z.zone_code)
+      if (zList.length) setZones(zList)
+    }
+    loadGeo()
   },[])
 
   // 2. Load values whenever metric/year/geo changes
