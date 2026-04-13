@@ -12,7 +12,7 @@ function getColor(value, domain, metric) {
   return scaleQuantile().domain(domain).range(RAMPS[metric])(value)
 }
 
-export default function Map({ geoData, valueMap, metric, selected, onSelect }) {
+export default function Map({ geoData, valueMap, metric, selected, onSelect, nameMap = {} }) {
   const divRef   = useRef(null)
   const mapRef   = useRef(null)
   const layerRef = useRef(null)
@@ -57,7 +57,7 @@ export default function Map({ geoData, valueMap, metric, selected, onSelect }) {
       },
       onEachFeature: (feat, lyr) => {
         const zc   = feat.properties.zone_code
-        const name = feat.properties.shapeName || feat.properties.zone_name || zc || '—'
+        const name = (zc && nameMap[zc]) || feat.properties.zone_name || feat.properties.shapeName || zc || '—'
         lyr.bindTooltip(name, { sticky: true, className: 'map-tip' })
         lyr.on('click',     ()  => onSelect(zc))
         lyr.on('mouseover', e   => e.target.setStyle({ fillOpacity: 1, weight: 1.5 }))
@@ -86,6 +86,23 @@ export default function Map({ geoData, valueMap, metric, selected, onSelect }) {
           padding: 4px 9px;
           font-size: 11px;
           font-family: 'Noto Sans', sans-serif;
+        }
+        .leaflet-container {
+          background: #e8e4db;
+          font-family: 'Noto Sans', sans-serif;
+        }
+        .leaflet-control-attribution {
+          font-size: 9px !important;
+          background: rgba(255,255,255,0.75) !important;
+          color: #8a8070 !important;
+          padding: 2px 5px !important;
+        }
+        .leaflet-control-attribution a {
+          color: #8a8070 !important;
+        }
+        .leaflet-control-zoom a {
+          color: #1a1208 !important;
+          font-weight: 400 !important;
         }
       `}</style>
       <div ref={divRef} style={{ width: '100%', height: '100%' }} />

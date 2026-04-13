@@ -186,7 +186,7 @@ export default function App(){
     return()=>{supabase.removeChannel(ch)}
   },[zones,metric,year])
 
-  /* Derived */
+  const nameMap = useMemo(()=>Object.fromEntries(zones.map(z=>[z.zone_code, z.zone_name]).filter(([k,v])=>k&&v)),[zones])
   const domain = useMemo(()=>Object.values(values).filter(v=>v!=null),[values])
   const sorted = useMemo(()=>[...zones].sort((a,b)=>(values[b.zone_code]??0)-(values[a.zone_code]??0)),[zones,values])
   const avg    = domain.length?domain.reduce((s,v)=>s+v,0)/domain.length:0
@@ -285,6 +285,7 @@ export default function App(){
                 selected={selected}
                 onSelect={zc=>setSelected(prev=>prev===zc?null:zc)}
                 flashZone={flash}
+                nameMap={nameMap}
               />
             )}
             {panel==='ranking'&&(
