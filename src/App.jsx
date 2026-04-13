@@ -1,5 +1,6 @@
+import Map from './Map.jsx'
 import { useState, useEffect, useRef, useMemo } from 'react'
-import { geoMercator, geoPath } from 'd3-geo'
+
 import { scaleQuantile } from 'd3-scale'
 import { extent } from 'd3-array'
 import { supabase, isConfigured } from './supabase'
@@ -87,83 +88,6 @@ function Sparkline({values,color,w=88,h=26}){
   return <canvas ref={ref} style={{width:w,height:h,display:'block'}}/>
 }
 
-/* ─── MAP — React SVG + D3 math only ────────────────────────────
-   D3 computes the projection and path strings.
-   React renders them as JSX <path> elements.
-   No imperative DOM manipulation — no timing bugs.
-──────────────────────────────────────────────────────────────── */
-function ChoroplethMap({geoData, valueMap, metric, selected, onSelect, flashZone}){
-  const containerRef = useRef(null)
-  const [dims, setDims] = useState(null)
-
-  useEffect(()=>{
-    const el = containerRef.current
-    if(!el)return
-    // Set initial size immediately
-    const r = el.getBoundingClientRect()
-    if(r.width>0&&r.height>0) setDims({w:r.width,h:r.height})
-    const ro = new ResizeObserver(([entry])=>{
-      const{width,height}=entry.contentRect
-      if(width>0&&height>0) setDims({w:width,h:height})
-    })
-    ro.observe(el)
-    return()=>ro.disconnect()
-  },[])
-
-  // Compute projection + all path strings when geo or dims change
-  const {pathStrings, colorFn} = useMemo(()=>{
-    if(!geoData||!dims) return {pathStrings:{}, colorFn:()=>'#ece7dc'}
-    const proj = geoMercator().fitSize([dims.w, dims.h], geoData)
-    const gen  = geoPath().projection(proj)
-    const ps   = {}
-    for(const feat of geoData.features){
-      const d = gen(feat)
-      if(d) ps[feat.properties.zone_code] = d
-    }
-    const domain = Object.values(valueMap).filter(v=>v!=null)
-    const cf = domain.length ? makeColor(domain, metric) : ()=>'#ece7dc'
-    return {pathStrings:ps, colorFn:cf}
-  }, [geoData, dims, valueMap, metric])
-
-  return(
-    <div ref={containerRef} style={{width:'100%',height:'100%',position:'relative',background:'#e8e4db'}}>
-      {!dims&&(
-        <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',gap:10,color:C.light}}>
-          <div style={{width:16,height:16,border:`1.5px solid ${C.rule}`,borderTop:`1.5px solid ${C.red}`,borderRadius:'50%',animation:'spin .8s linear infinite'}}/>
-          Loading…
-        </div>
-      )}
-      {dims&&(
-        <svg
-          width={dims.w}
-          height={dims.h}
-          style={{display:'block',position:'absolute',top:0,left:0}}
-        >
-          {Object.entries(pathStrings).map(([zc, d])=>{
-            const val   = valueMap[zc]
-            const isSel = selected===zc
-            const isFlash = flashZone===zc
-            return(
-              <path
-                key={zc}
-                d={d}
-                fill={val!=null ? colorFn(val) : '#ddd8cc'}
-                stroke={isSel ? C.heavy : '#ffffff'}
-                strokeWidth={isSel ? 1.5 : 0.5}
-                opacity={isFlash ? 0.4 : isSel ? 1 : 0.88}
-                style={{cursor:'pointer',transition:'opacity .15s, fill .3s'}}
-                onClick={()=>onSelect(zc)}
-              />
-            )
-          })}
-        </svg>
-      )}
-      <div style={{position:'absolute',bottom:6,left:8,fontSize:8,color:C.light,fontFamily:C.mono,background:'rgba(255,255,255,.85)',padding:'2px 5px',borderRadius:1,pointerEvents:'none'}}>
-        Approximate ADM2 boundaries · {Object.keys(pathStrings).length} zones
-      </div>
-    </div>
-  )
-}
 
 /* ─── CSS ────────────────────────────────────────────────────── */
 const CSS=`
@@ -334,7 +258,7 @@ export default function App(){
 
           <div style={{flex:1,overflow:'hidden',position:'relative'}}>
             {panel==='map'&&(
-              <ChoroplethMap
+              <Map
                 geoData={geoData}
                 valueMap={values}
                 metric={metric}
